@@ -136,6 +136,115 @@ function parseYAML(data) {
     return yaml.load(data);
 }
 
+function simpleReadFile(path) {
+    return new Promise(function(resolve, reject) {
+        fs.readFile(path,'utf8',function(err,data) {
+            if(err) {
+                resolve([]);
+                return;
+            }
+            if(data.length === 0) {
+                resolve([]);
+            }
+            resolve(parseYAML(data));
+        });
+    });
+}
+
+function sanitizeName(name) {
+    return name.replace(/[^a-zA-Z_\-0-9]/g, '_').substr(0, 100);
+}
+
+function readFileFolder(path,backupPath,emptyResponse,type) {
+    const mainFile = path + '/main.yml';
+    const orderFile = path + '/order.yml'
+    return new Promise(function(resolve) {
+        fs.readFile(mainFile,'utf8',function(err,data) {
+            if (!err) {
+                if (data.length === 0) {
+                    // console.warn(log._("storage.localfilesystem.empty",{type:type}));
+                    try {
+                        var backupStat = fs.statSync(backupPath);
+                        if (backupStat.size === 0) {
+                            // Empty flows, empty backup - return empty flow
+                            return resolve(emptyResponse);
+                        }
+                        // Empty flows, restore backup
+                        // log.warn(log._("storage.localfilesystem.restore",{path:backupPath,type:type}));
+
+                        //FIXME: restore folder backup for split mechanism
+                        fs.removeSync(path)
+                        fs.copy(backupPath,path,function(backupCopyErr) {
+                            if (backupCopyErr) {
+                                // Restore backup failed
+                                // log.warn(log._("storage.localfilesystem.restore-fail",{message:backupCopyErr.toString(),type:type}));
+                                resolve([]);
+                            } else {
+                                // Loop back in to load the restored backup
+                                resolve(readFileFolder(path,backupPath,emptyResponse,type));
+                            }
+                        });
+                        return;
+                    } catch(backupStatErr) {
+                        // Empty flow file, no back-up file
+                        return resolve(emptyResponse);
+                    }
+                }
+                try {
+                    let order;
+                    try {
+                        order = parseYAML(fs.readFileSync(orderFile));
+                    } catch {
+                        order = null;
+                    }
+
+                    const mainParsed = parseYAML(data);
+                    const subPromises = [];
+                    for(const elem of mainParsed) {
+                        const subFile = path +  '/' + elem.type + '__' + elem.id + '__' + sanitizeName(elem.name || elem.label || '')  + '.yml';
+                        subPromises.push(simpleReadFile(subFile));
+                    }
+
+                    return Promise.all(subPromises).then((elems) => {
+                        for(const nodes of elems) {
+                            mainParsed.push(...nodes);
+                        }
+                        resolve(mainParsed);
+                    }).then(unsorted => {
+                        if(!order) {
+                            // we found no order, simply return it unsorted
+                            return unsorted;
+                        }
+                        // try to reconstruct the order if we have it ready
+                        const byId = {};
+                        for(const elem of unsorted) {
+                            byId[elem.id] = elem;
+                        }
+                        const sorted = [];
+                        for(const id of order) {
+                            const found = byId[id];
+                            if(!found) {
+                                // the order is broken, return the unsorted
+                                return unsorted;
+                            }
+                            sorted.push(byId[id]);
+                        }
+                        return sorted;
+                    });                    
+                } catch(parseErr) {
+                    // log.warn(log._("storage.localfilesystem.invalid",{type:type}));
+                    return resolve(emptyResponse);
+                }
+            } else {
+                if (type === 'flow') {
+                    // log.info(log._("storage.localfilesystem.create",{type:type}));
+                }
+                resolve(emptyResponse);
+            }
+        });
+    });
+}
+
 function readFile(path,backupPath,emptyResponse,type) {
     return new Promise(function(resolve) {
         fs.readFile(path,'utf8',function(err,data) {
@@ -150,6 +259,8 @@ function readFile(path,backupPath,emptyResponse,type) {
                         }
                         // Empty flows, restore backup
                         // log.warn(log._("storage.localfilesystem.restore",{path:backupPath,type:type}));
+
+                        //FIXME: restore folder backup for split mechanism
                         fs.copy(backupPath,path,function(backupCopyErr) {
                             if (backupCopyErr) {
                                 // Restore backup failed
@@ -234,6 +345,7 @@ var localfilesystem_yaml = {
             flowsFile = 'flows_'+require('os').hostname()+'.yaml';
             flowsFullPath = fspath.join(settings.userDir,flowsFile);
         }
+
         var ffExt = fspath.extname(flowsFullPath);
         var ffName = fspath.basename(flowsFullPath);
         var ffBase = fspath.basename(flowsFullPath,ffExt);
@@ -278,7 +390,8 @@ var localfilesystem_yaml = {
         if (!initialFlowLoadComplete) {
             initialFlowLoadComplete = true;
         }
-        return readFile(flowsFullPath,flowsFileBackup,[],'flow');
+        return readFileFolder(flowsFullPath + '.split', flowsFileBackup + '.split', [], 'flow');
+        //return readFile(flowsFullPath,flowsFileBackup,[],'flow');
     },
 
     saveFlows: function(flows) {
@@ -287,18 +400,71 @@ var localfilesystem_yaml = {
         }
 
         try {
-            fs.renameSync(flowsFullPath,flowsFileBackup);
+            fs.renameSync(flowsFullPath, flowsFileBackup);
         } catch(err) {
         }
 
         var flowData;
 
-        if (settings.flowFilePretty) {
-            flowData = yaml.dump(flows, {'lineWidth': 160});
-        } else {
-            flowData = yaml.dump(flows, {'lineWidth': 160});
+        const main = [];
+        const mainById = {};
+        const splitByZ = {};
+
+        const order = [];
+
+        for(const elem of flows) {
+            order.push(elem.id);
+            if(elem.z) {
+                splitByZ[elem.z] = splitByZ[elem.z] || [];
+                splitByZ[elem.z].push(elem);
+            } else {
+                main.push(elem);
+                mainById[elem.id] = elem;
+            }
         }
-        return writeFile(flowsFullPath, flowData);
+        
+        const dumpName = (elem) => {
+            return elem.id + ' ~ ' + (elem.name || elem.label || '') ;
+        }
+
+        const promises = [];
+
+        const mainLines = [];
+        for(const elem of main) {
+            mainLines.push(`# START ${dumpName(elem)}\n${yaml.dump([elem], {'lineWidth': 160})}# END ${dumpName(elem)}\n`);
+        }
+        const mainContents = mainLines.join('\n');
+
+        const flowsFullPathSplitDir = flowsFullPath + '.split';
+
+        try {
+            fs.removeSync(flowsFileBackup + '.split');
+            fs.renameSync(flowsFullPathSplitDir,flowsFileBackup + '.split');
+        } catch(err) {
+
+        }
+
+        return promiseDir(flowsFullPathSplitDir).then(() => {
+            promises.push(writeFile(flowsFullPathSplitDir + '/order.yml', yaml.dump(order)));
+            promises.push(writeFile(flowsFullPathSplitDir + '/main.yml', mainContents));
+
+            for(const z of Object.keys(splitByZ)) {
+                const splitByZLines = [];
+                for(const elem of splitByZ[z]) {
+                    splitByZLines.push(`# START ${dumpName(elem)}\n${yaml.dump([elem],  {'lineWidth': 160})}# END ${dumpName(elem)}\n`);
+                }
+                const splitByZDump = splitByZLines.join('\n');
+                promises.push(writeFile(flowsFullPathSplitDir + '/' + mainById[z].type + '__' + z  + '__' + sanitizeName(mainById[z].name || mainById[z].label || '') + '.yml', splitByZDump));
+            }
+    
+            if (settings.flowFilePretty) {
+                flowData = yaml.dump(flows, {'lineWidth': 160});
+            } else {
+                flowData = yaml.dump(flows, {'lineWidth': 160});
+            }
+            promises.push(writeFile(flowsFullPath, '# GENERATED, will be overwritten on next deploy #\n' + flowData));
+            return Promise.all(promises);
+        });
     },
 
     getCredentials: function() {
@@ -443,5 +609,6 @@ var localfilesystem_yaml = {
         });
     }
 };
+
 
 module.exports = localfilesystem_yaml;
