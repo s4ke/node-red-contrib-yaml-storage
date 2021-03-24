@@ -209,27 +209,35 @@ function readFileFolder(path,backupPath,emptyResponse,type) {
                         for(const nodes of elems) {
                             mainParsed.push(...nodes);
                         }
-                        resolve(mainParsed);
-                    }).then(unsorted => {
+                        return mainParsed;
+                    }).then((unsorted) => {
                         if(!order) {
                             // we found no order, simply return it unsorted
                             return unsorted;
                         }
-                        // try to reconstruct the order if we have it ready
-                        const byId = {};
-                        for(const elem of unsorted) {
-                            byId[elem.id] = elem;
-                        }
-                        const sorted = [];
-                        for(const id of order) {
-                            const found = byId[id];
-                            if(!found) {
-                                // the order is broken, return the unsorted
-                                return unsorted;
+                        try {
+                            // try to reconstruct the order if we have it ready
+                            const byId = {};
+                            for(const elem of unsorted) {
+                                byId[elem.id] = elem;
                             }
-                            sorted.push(byId[id]);
+                            const sorted = [];
+                            for(const id of order) {
+                                const found = byId[id];
+                                if(!found) {
+                                    console.warn(`did not find element ${id}, falling back to unsorted`);
+                                    // the order is broken, return the unsorted
+                                    return unsorted;
+                                }
+                                sorted.push(byId[id]);
+                            }
+                            return sorted;
+                        } catch(err) {
+                            console.error(err);
+                            return unsorted;
                         }
-                        return sorted;
+                    }).then((result) => {
+                        resolve(result);
                     });                    
                 } catch(parseErr) {
                     // log.warn(log._("storage.localfilesystem.invalid",{type:type}));
