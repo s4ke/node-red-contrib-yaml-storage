@@ -570,7 +570,7 @@ var localfilesystem_yaml = {
                 });
                 return dirs.concat(files);
             });
-        }).otherwise(function(err) {
+        }).catch(function(err) {
             // if path is empty, then assume it was a folder, return empty
             if (path === ""){
                 return [];
@@ -586,7 +586,7 @@ var localfilesystem_yaml = {
             // check for path.json as an alternative if flows
             if (type === "flows" && !/\.json$/.test(path)) {
                 return localfilesystem_yaml.getLibraryEntry(type,path+".json")
-                .otherwise(function(e) {
+                .catch(function(e) {
                     throw err;
                 });
             } else {
